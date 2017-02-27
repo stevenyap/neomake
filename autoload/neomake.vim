@@ -701,15 +701,9 @@ endfunction
 function! s:AddExprCallback(jobinfo, prev_index) abort
     let maker = a:jobinfo.maker
     let file_mode = a:jobinfo.file_mode
-    let highlight_columns = get(g:, 'neomake_highlight_columns', 1)
-    let highlight_lines = get(g:, 'neomake_highlight_lines', 0)
     let list = file_mode ? getloclist(0) : getqflist()
     let list_modified = 0
-    let counts_changed = 0
     let index = a:prev_index
-    let maker_type = file_mode ? 'file' : 'project'
-    let cleaned_signs = 0
-    let ignored_signs = []
     unlet! s:postprocess  " vim73
     let s:postprocess = get(maker, 'postprocess', function('neomake#utils#CompressWhitespace'))
     if type(s:postprocess) != type([])
@@ -719,6 +713,7 @@ function! s:AddExprCallback(jobinfo, prev_index) abort
     endif
     let debug = get(g:, 'neomake_verbose', 1) >= 3
 
+    let entries = []
     while index < len(list)
         let entry = list[index]
         let entry.maker_name = has_key(maker, 'name') ? maker.name : 'makeprg'
@@ -760,47 +755,7 @@ function! s:AddExprCallback(jobinfo, prev_index) abort
             continue
         endif
 
-        if !file_mode
-            if neomake#statusline#AddQflistCount(entry)
-                let counts_changed = 1
-            endif
-        endif
-
-        if !entry.bufnr
-            continue
-        endif
-
-        if file_mode
-            if neomake#statusline#AddLoclistCount(entry.bufnr, entry)
-                let counts_changed = 1
-            endif
-        endif
-
-        if !cleaned_signs
-            if file_mode
-                call neomake#CleanOldFileSignsAndErrors(entry.bufnr)
-            else
-                call neomake#CleanOldProjectSignsAndErrors()
-            endif
-            let cleaned_signs = 1
-        endif
-
-        " Track all errors by buffer and line
-        let s:current_errors[maker_type][entry.bufnr] = get(s:current_errors[maker_type], entry.bufnr, {})
-        let s:current_errors[maker_type][entry.bufnr][entry.lnum] = get(
-            \ s:current_errors[maker_type][entry.bufnr], entry.lnum, [])
-        call add(s:current_errors[maker_type][entry.bufnr][entry.lnum], entry)
-
-        if g:neomake_place_signs
-            if entry.lnum is 0
-                let ignored_signs += [entry]
-            else
-                call neomake#signs#PlaceSign(entry, maker_type)
-            endif
-        endif
-        if highlight_columns || highlight_lines
-            call neomake#highlights#AddHighlight(entry, maker_type)
-        endif
+        call add(entries, entry)
     endwhile
 
     if list_modified
@@ -810,12 +765,8 @@ function! s:AddExprCallback(jobinfo, prev_index) abort
             call setqflist(list, 'r')
         endif
     endif
-    if len(ignored_signs)
-        call neomake#utils#DebugMessage(printf(
-                    \ 'Could not place signs for %d entries without line number: %s.',
-                    \ len(ignored_signs), string(ignored_signs)))
-    endif
-    return counts_changed
+
+    return entries
 endfunction
 
 function! s:CleanJobinfo(jobinfo) abort
@@ -924,15 +875,17 @@ function! s:ProcessJobOutput(jobinfo, lines, source) abort
     call s:init_job_output(a:jobinfo)
 
     let prev_list = file_mode ? getloclist(0) : getqflist()
-    if has_key(maker, 'get_entries_for_output')
-        let entries = call(maker.get_entries_for_output, [{
+    if has_key(maker, 'process_output')
+        let entries = call(maker.process_output, [{
                     \ 'output': a:lines,
                     \ 'source': a:source,
                     \ 'jobinfo': a:jobinfo}])
-        if file_mode
-            call setloclist(0, entries, 'a')
-        else
-            call setqflist(entries, 'a')
+        if len(entries)
+            if file_mode
+                call setloclist(0, entries, 'a')
+            else
+                call setqflist(entries, 'a')
+            endif
         endif
     else
         if has_key(maker, 'mapexpr')
@@ -955,9 +908,67 @@ function! s:ProcessJobOutput(jobinfo, lines, source) abort
         finally
             let &errorformat = olderrformat
         endtry
+
+        let entries = s:AddExprCallback(a:jobinfo, len(prev_list))
     endif
 
-    let counts_changed = s:AddExprCallback(a:jobinfo, len(prev_list))
+
+    let counts_changed = 0
+    let cleaned_signs = 0
+    let ignored_signs = []
+    let maker_type = file_mode ? 'file' : 'project'
+    let do_highlight = get(g:, 'neomake_highlight_columns', 1)
+                \ || get(g:, 'neomake_highlight_lines', 0)
+    for entry in entries
+        if !file_mode
+            if neomake#statusline#AddQflistCount(entry)
+                let counts_changed = 1
+            endif
+        endif
+
+        if !entry.bufnr
+            continue
+        endif
+
+        if file_mode
+            if neomake#statusline#AddLoclistCount(entry.bufnr, entry)
+                let counts_changed = 1
+            endif
+        endif
+
+        if !cleaned_signs
+            if file_mode
+                call neomake#CleanOldFileSignsAndErrors(entry.bufnr)
+            else
+                call neomake#CleanOldProjectSignsAndErrors()
+            endif
+            let cleaned_signs = 1
+        endif
+
+        " Track all errors by buffer and line
+        let s:current_errors[maker_type][entry.bufnr] = get(s:current_errors[maker_type], entry.bufnr, {})
+        let s:current_errors[maker_type][entry.bufnr][entry.lnum] = get(
+            \ s:current_errors[maker_type][entry.bufnr], entry.lnum, [])
+        call add(s:current_errors[maker_type][entry.bufnr][entry.lnum], entry)
+
+        if g:neomake_place_signs
+            if entry.lnum is 0
+                let ignored_signs += [entry]
+            else
+                call neomake#signs#PlaceSign(entry, maker_type)
+            endif
+        endif
+        if do_highlight
+            call neomake#highlights#AddHighlight(entry, maker_type)
+        endif
+    endfor
+
+    if len(ignored_signs)
+        call neomake#utils#DebugMessage(printf(
+                    \ 'Could not place signs for %d entries without line number: %s.',
+                    \ len(ignored_signs), string(ignored_signs)))
+    endif
+
     if !counts_changed
         let counts_changed = (file_mode && getloclist(0) != prev_list)
                     \ || (!file_mode && getqflist() != prev_list)
