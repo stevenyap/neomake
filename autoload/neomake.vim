@@ -187,6 +187,13 @@ function! s:MakeJob(make_id, options) abort
         endif
     endif
 
+    if has_key(maker, 'get_list_entries')
+        let entries = maker.get_list_entries()
+        call s:ProcessEntries(jobinfo, entries)
+        call s:CleanJobinfo(jobinfo)
+        return
+    endif
+
     if !executable(maker.exe)
         if !get(maker, 'auto_enabled', 0)
             let error = printf('Exe (%s) of maker %s is not executable.', maker.exe, maker.name)
@@ -443,17 +450,20 @@ function! neomake#GetMaker(name_or_maker, ...) abort
             let maker.name = 'unnamed_maker'
         endif
     endif
-    let defaults = copy(s:maker_defaults)
-    call extend(defaults, {
-        \ 'exe': maker.name,
-        \ 'args': [],
-        \ 'errorformat': &errorformat,
-        \ })
-    let bufnr = bufnr('%')
-    for [key, default] in items(defaults)
-        let maker[key] = neomake#utils#GetSetting(key, maker, default, fts, bufnr)
-        unlet! default  " workaround for old Vim (7.3.429)
-    endfor
+    " Set defaults for "normal" makers.
+    if !has_key(maker, 'get_list_entries')
+        let defaults = copy(s:maker_defaults)
+        call extend(defaults, {
+            \ 'exe': maker.name,
+            \ 'args': [],
+            \ 'errorformat': &errorformat,
+            \ })
+        let bufnr = bufnr('%')
+        for [key, default] in items(defaults)
+            let maker[key] = neomake#utils#GetSetting(key, maker, default, fts, bufnr)
+            unlet! default  " workaround for old Vim (7.3.429)
+        endfor
+    endif
 
     if exists('real_ft')
         let maker.ft = real_ft
@@ -864,54 +874,20 @@ function! s:init_job_output(jobinfo) abort
     let s:make_info[a:jobinfo.make_id].initialized_for_output = 1
 endfunction
 
-function! s:ProcessJobOutput(jobinfo, lines, source) abort
-    let maker = a:jobinfo.maker
+function! s:ProcessEntries(jobinfo, entries, ...) abort
     let file_mode = a:jobinfo.file_mode
 
-    call neomake#utils#DebugMessage(printf(
-                \ '%s: processing %d lines of output.',
-                \ maker.name, len(a:lines)), a:jobinfo)
-
-    call s:init_job_output(a:jobinfo)
-
-    let prev_list = file_mode ? getloclist(0) : getqflist()
-    if has_key(maker, 'process_output')
-        let entries = call(maker.process_output, [{
-                    \ 'output': a:lines,
-                    \ 'source': a:source,
-                    \ 'jobinfo': a:jobinfo}])
-        if len(entries)
-            if file_mode
-                call setloclist(0, entries, 'a')
-            else
-                call setqflist(entries, 'a')
-            endif
-        endif
+    if a:0
+        let prev_list = a:1
     else
-        if has_key(maker, 'mapexpr')
-            let l:neomake_bufname = bufname(a:jobinfo.bufnr)
-            " @vimlint(EVL102, 1, l:neomake_bufdir)
-            let l:neomake_bufdir = fnamemodify(neomake_bufname, ':h')
-            " @vimlint(EVL102, 1, l:neomake_output_source)
-            let l:neomake_output_source = a:source
-            call map(a:lines, maker.mapexpr)
+        call s:init_job_output(a:jobinfo)
+        let prev_list = file_mode ? getloclist(0) : getqflist()
+        if file_mode
+            call setloclist(0, a:entries, 'a')
+        else
+            call setqflist(a:entries, 'a')
         endif
-
-        let olderrformat = &errorformat
-        let &errorformat = maker.errorformat
-        try
-            if file_mode
-                laddexpr a:lines
-            else
-                caddexpr a:lines
-            endif
-        finally
-            let &errorformat = olderrformat
-        endtry
-
-        let entries = s:AddExprCallback(a:jobinfo, len(prev_list))
     endif
-
 
     let counts_changed = 0
     let cleaned_signs = 0
@@ -919,7 +895,7 @@ function! s:ProcessJobOutput(jobinfo, lines, source) abort
     let maker_type = file_mode ? 'file' : 'project'
     let do_highlight = get(g:, 'neomake_highlight_columns', 1)
                 \ || get(g:, 'neomake_highlight_lines', 0)
-    for entry in entries
+    for entry in a:entries
         if !file_mode
             if neomake#statusline#AddQflistCount(entry)
                 let counts_changed = 1
@@ -982,6 +958,52 @@ function! s:ProcessJobOutput(jobinfo, lines, source) abort
 
     call s:HandleLoclistQflistDisplay(a:jobinfo.file_mode)
     call neomake#EchoCurrentError()
+endfunction
+
+function! s:ProcessJobOutput(jobinfo, lines, source) abort
+    let maker = a:jobinfo.maker
+    let file_mode = a:jobinfo.file_mode
+
+    call neomake#utils#DebugMessage(printf(
+                \ '%s: processing %d lines of output.',
+                \ maker.name, len(a:lines)), a:jobinfo)
+
+    if has_key(maker, 'process_output')
+        let entries = call(maker.process_output, [{
+                    \ 'output': a:lines,
+                    \ 'source': a:source,
+                    \ 'jobinfo': a:jobinfo}])
+        call s:ProcessEntries(a:jobinfo, entries)
+        return
+    endif
+
+    call s:init_job_output(a:jobinfo)
+
+    " Old-school handling through errorformat.
+    let prev_list = file_mode ? getloclist(0) : getqflist()
+    if has_key(maker, 'mapexpr')
+        let l:neomake_bufname = bufname(a:jobinfo.bufnr)
+        " @vimlint(EVL102, 1, l:neomake_bufdir)
+        let l:neomake_bufdir = fnamemodify(neomake_bufname, ':h')
+        " @vimlint(EVL102, 1, l:neomake_output_source)
+        let l:neomake_output_source = a:source
+        call map(a:lines, maker.mapexpr)
+    endif
+
+    let olderrformat = &errorformat
+    let &errorformat = maker.errorformat
+    try
+        if file_mode
+            laddexpr a:lines
+        else
+            caddexpr a:lines
+        endif
+    finally
+        let &errorformat = olderrformat
+    endtry
+
+    let entries = s:AddExprCallback(a:jobinfo, len(prev_list))
+    call s:ProcessEntries(a:jobinfo, entries, prev_list)
 endfunction
 
 function! neomake#ProcessCurrentWindow() abort
