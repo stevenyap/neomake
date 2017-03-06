@@ -1491,7 +1491,6 @@ endfunction
 
 function! s:map_makers(jobinfo, ...) abort
     let r = []
-    let file_mode = a:0
     for maker_or_name in a:jobinfo.enabled_makers
         try
             let maker = call('neomake#GetMaker', [maker_or_name] + a:000)
